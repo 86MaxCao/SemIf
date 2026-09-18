@@ -1,4 +1,4 @@
-# SemIf
+# SemIf (formerly OpenJev)
 
 <div align="center">
 
