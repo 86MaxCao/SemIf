@@ -59,17 +59,19 @@ The 6.7 MB fixture is project-authored and has SHA-256 `8dcf414b12fc2684e3c4ca5f
 - `../results/raw/quality-comparison.json` contains the complete aggregate reports behind the README table.
 - `evaluate.py` recomputes hard-label accuracy, balanced accuracy, F1, probability metrics, and paired source-group bootstrap intervals.
 
-Fetch the exact external snapshots:
+Fetch the redistributable external snapshots:
 
 ```bash
-python benchmarks/fetch_sources.py --output /path/on/large-drive/openjev-sources
+python benchmarks/fetch_sources.py --output /path/on/large-drive/semif-sources
 ```
+
+TypeSafe source snapshots are not included. If available to you, place local copies in the same source directory using the filenames expected by `build_typesafe.py`.
 
 Rebuild the evaluated rows deterministically from those verified snapshots:
 
 ```bash
-SRC=/path/on/large-drive/openjev-sources
-OUT=/path/on/large-drive/openjev-built
+SRC=/path/on/large-drive/semif-sources
+OUT=/path/on/large-drive/semif-built
 mkdir -p "$OUT"
 
 python benchmarks/build_wanli.py \
@@ -113,11 +115,11 @@ Regenerate the row-level predictions with the published scorer paths. The commit
 score_set () {
   input=$1
   stem=$2
-  CUDA_VISIBLE_DEVICES=0 openjev-score --mode serial \
+  CUDA_VISIBLE_DEVICES=0 semif-score --mode serial \
     --model Qwen/Qwen3.5-4B \
     --revision 851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a \
     --input "$input" --output "direct-$stem.jsonl"
-  CUDA_VISIBLE_DEVICES=0 openjev-score --mode reranker \
+  CUDA_VISIBLE_DEVICES=0 semif-score --mode reranker \
     --model Qwen/Qwen3-Reranker-4B \
     --revision 22e683669bc0f0bd69640a1354a6d0aebcfeede5 \
     --input "$input" --output "reranker-$stem.jsonl"
@@ -145,7 +147,7 @@ python benchmarks/evaluate.py \
   --output wanli-report.json
 ```
 
-The fetcher has byte limits and verifies every downloaded SHA-256. TypeSafe artifacts are fetched for local evaluation because no explicit redistribution grant was located. WANLI is CC-BY-4.0. Every provides its experiment JSON and source archive as direct public downloads.
+The fetcher has byte limits and verifies every downloaded SHA-256. TypeSafe source records are not included. WANLI is CC-BY-4.0. Every provides its experiment JSON and source archive as direct public downloads.
 
 The source-specific transformations are described in [METHOD.md](../docs/METHOD.md). Verify every committed raw result and its connection to the machine-readable summary:
 

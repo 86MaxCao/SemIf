@@ -9,8 +9,8 @@ import statistics
 import time
 from pathlib import Path
 
-from openjev_phase1.core import load_causal_model
-from openjev_phase1.shared import score_shared
+from semif_phase1.core import load_causal_model
+from semif_phase1.shared import score_shared
 
 
 class TimelineStreamer:
