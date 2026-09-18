@@ -4,6 +4,8 @@
 
 **Semantic ifs from open models, on a 3090 at home.**
 
+*Independent project; not affiliated with Jev or TypeSafe.*
+
 **Wow! No waitlist.** [Run it in your browser today.](webgpu-demo/index.html)
 
 [![Measured replay: typed decisions appear together while JSON streams token by token](demo/assets/semif-phase1-replay.gif)](demo/index.html)
