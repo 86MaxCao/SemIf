@@ -3,6 +3,7 @@ import gzip
 import hashlib
 import importlib.util
 from pathlib import Path
+import sys
 
 import pytest
 
@@ -10,6 +11,12 @@ spec = importlib.util.spec_from_file_location(
     "mlx_evidence", Path(__file__).resolve().parents[1] / "benchmarks/mlx_evidence.py")
 evidence = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(evidence)
+
+benchmarks = Path(__file__).resolve().parents[1] / "benchmarks"
+sys.path.insert(0, str(benchmarks))
+verify_spec = importlib.util.spec_from_file_location("verify_mlx", benchmarks / "verify_mlx.py")
+verify = importlib.util.module_from_spec(verify_spec)
+verify_spec.loader.exec_module(verify)
 
 
 @pytest.mark.parametrize("compressed", [False, True])
@@ -40,3 +47,14 @@ def test_rejects_ambiguous_or_corrupt_compressed_evidence(tmp_path):
     compressed.write_bytes(b"not gzip")
     with pytest.raises(gzip.BadGzipFile):
         evidence.read_bytes(path)
+
+
+def test_verifier_tolerates_only_float_roundoff():
+    verify.assert_json_close(
+        {"score": 0.1 + 0.2, "choices": ["yes", "no"]},
+        {"score": 0.3, "choices": ["yes", "no"]},
+    )
+    with pytest.raises(AssertionError):
+        verify.assert_json_close({"score": 0.31}, {"score": 0.3})
+    with pytest.raises(AssertionError):
+        verify.assert_json_close({"choices": ["no"]}, {"choices": ["yes"]})

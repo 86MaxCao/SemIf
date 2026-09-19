@@ -2,6 +2,7 @@
 import argparse
 import hashlib
 import json
+import math
 import statistics
 from pathlib import Path
 
@@ -12,6 +13,24 @@ from mlx_benchmark import choice, compare, read
 
 def load(path):
     return read_json(path)
+
+
+def assert_json_close(actual, expected, path="$"):
+    """Require identical JSON structure while tolerating float roundoff."""
+    assert type(actual) is type(expected), f"{path}: type mismatch"
+    if isinstance(actual, dict):
+        assert actual.keys() == expected.keys(), f"{path}: key mismatch"
+        for key in actual:
+            assert_json_close(actual[key], expected[key], f"{path}.{key}")
+    elif isinstance(actual, list):
+        assert len(actual) == len(expected), f"{path}: length mismatch"
+        for index, (left, right) in enumerate(zip(actual, expected)):
+            assert_json_close(left, right, f"{path}[{index}]")
+    elif isinstance(actual, float):
+        assert math.isclose(actual, expected, rel_tol=1e-12, abs_tol=1e-12), (
+            f"{path}: {actual!r} != {expected!r}")
+    else:
+        assert actual == expected, f"{path}: {actual!r} != {expected!r}"
 
 
 def verify(root):
@@ -64,7 +83,7 @@ def verify(root):
             gold, rows = read(f"benchmarks/data/{name}.jsonl"), read(root / f"{name}.jsonl")
             validate(rows, gold)
             original = read(f"results/raw/predictions/direct-{name}.jsonl")
-            assert report[name]["evaluation"] == evaluate.evaluate(gold, rows, comparison=original)
+            assert_json_close(report[name]["evaluation"], evaluate.evaluate(gold, rows, comparison=original))
             assert report[name]["vs_published_torch"] == compare(original, rows)
             assert not report[name]["vs_published_torch"]["prompt_mismatches"]
             assert summary["quality"][name] == report[name]["evaluation"]["mean_family_balanced_accuracy"]
