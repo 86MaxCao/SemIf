@@ -47,9 +47,7 @@ when any row carries `state.images`:
 ```
 
 Requirements: a [nano-vllm-prefillonly](https://github.com/86MaxCao/nano-vllm-prefillonly)
-checkout that provides the `prefill_last_logits` and
-`prefill_last_logits_multimodal` APIs, one
-NVIDIA GPU, and a VLM (e.g. Qwen3-VL) for image rows. Image paths must be local
+checkout, one NVIDIA GPU, and a VLM (e.g. Qwen3-VL) for image rows. Image paths must be local
 files. `--mode direct` only.
 
 ## Verified end-to-end (single GPU)
