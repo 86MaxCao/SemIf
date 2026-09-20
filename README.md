@@ -1,3 +1,76 @@
+# SemIf — nano-vllm prefill backend & multimodal scoring
+
+This branch (`feat/nanovllm-multimodal-backend`) adapts SemIf's direct scoring
+pipeline to a prefill-only inference engine and extends it with image evidence.
+
+## What was added
+
+- **`DecisionBackend` protocol** (`src/semif_phase1/backends.py`): one batched
+  scoring contract shared by the torch, MLX, and nano-vllm paths. The backend
+  owns model loading and batch scoring; rows keep their input order.
+- **nano-vllm text backend** (`NanoVLLMBackend`): scores whole batches with a
+  single batched prefill through
+  [nano-vllm-prefillonly](https://github.com/GeeeekExplorer/nano-vllm)'s
+  deterministic `prefill_last_logits` API, instead of one full forward per row.
+  The engine runs in `prefill_only_mode` (no sampling, no decode, no KV cache).
+- **Image evidence in the decision schema** (`src/semif_phase1/core.py`): rows
+  may carry local image files under `state.images`; URLs are rejected, and every
+  result records the SHA-256 of each image. Text-only rows are unchanged.
+- **nano-vllm multimodal backend** (`NanoVLLMMultimodalBackend`): mixed batches
+  of image rows and text-only rows are scored in one batched prefill via
+  `prefill_last_logits_multimodal`; a text-only row in the batch does not
+  disturb the image rows.
+
+## Usage
+
+```bash
+# Text decisions, batched prefill
+CUDA_VISIBLE_DEVICES=0 PYTHONPATH=src:<nano-vllm-prefillonly checkout> \
+python -m semif_phase1.cli --mode direct --backend nanovllm \
+  --model <path-to-Qwen3-0.6B> --revision <pinned-revision> \
+  --input examples/decisions.jsonl --output results.jsonl
+```
+
+Multimodal rows use the same CLI; a batch is routed to the multimodal backend
+when any row carries `state.images`:
+
+```json
+{
+  "id": "scene-1",
+  "state": {"text": "Judge the road layout.", "images": [{"path": "images/intersection.jpg"}]},
+  "question": "Which road is wider?",
+  "options": [
+    {"id": "left", "description": "Left road"},
+    {"id": "right", "description": "Right road"}
+  ]
+}
+```
+
+Requirements: the [nano-vllm-prefillonly](https://github.com/GeeeekExplorer/nano-vllm)
+checkout with the `prefill_last_logits` APIs (commit `4a99916` or later), one
+NVIDIA GPU, and a VLM (e.g. Qwen3-VL) for image rows. Image paths must be local
+files. `--mode direct` only.
+
+## Verified end-to-end (single GPU)
+
+- **Text**: Qwen3-0.6B on `examples/decisions.jsonl` — all 3 decisions scored,
+  argmax agrees with the torch backend; logit differences are BF16 kernel-level
+  noise (solo vs batch within the engine is stable).
+- **Multimodal**: Qwen3-VL-2B on a mixed batch (two image rows with identical
+  text but different images, plus one text-only row) — the image rows answer
+  red/blue correctly per their images, and the text-only row is scored in the
+  same batch without disturbing them.
+
+Known limitation: Qwen3.5 (GDN linear attention) batched prefill is numerically
+inequivalent to single-sequence prefill in the engine; tracked in the engine's
+issue log and fixed separately. Use Qwen3 / Qwen3-VL / Qwen2.5-VL with this
+backend.
+
+Tests: `tests/test_nanovllm_backend.py` and `tests/test_multimodal_schema.py`
+(skip automatically without the package or a GPU).
+
+---
+
 # SemIf (formerly OpenJev)
 
 <div align="center">
