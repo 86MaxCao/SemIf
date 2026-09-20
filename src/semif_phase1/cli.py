@@ -6,8 +6,8 @@ import argparse
 import json
 from pathlib import Path
 
-from .core import load_causal_model, validate_row
-from .direct import score as direct_score
+from .core import validate_row
+from .backends import TorchDirectBackend
 from .reranker import score as reranker_score
 from .serial import SerialPrefixScorer
 from .shared import score_shared
@@ -42,7 +42,6 @@ def main() -> None:
         parser.error("Input is empty")
     for row in rows:
         validate_row(row)
-    direct, serial, shared = direct_score, SerialPrefixScorer, score_shared
     if args.backend == "mlx":
         from . import mlx_backend
 
@@ -51,8 +50,10 @@ def main() -> None:
         model, tokenizer, metadata = mlx_backend.load_model(
             args.model, args.revision, args.mlx_bits, cache_limit_mib=cache_limit_mib)
         direct, serial, shared = mlx_backend.score, mlx_backend.SerialPrefixScorer, mlx_backend.score_shared
+        backend = None
     else:
-        model, tokenizer, metadata = load_causal_model(args.model, args.revision)
+        backend = TorchDirectBackend(args.model, args.revision)
+        model, tokenizer, metadata = backend.model, backend.tokenizer, backend.model_info
     args.output.parent.mkdir(parents=True, exist_ok=True)
     with args.output.open("x") as destination:
         if args.mode == "shared":
@@ -63,6 +64,12 @@ def main() -> None:
             scorer = serial(model, tokenizer, metadata, args.max_tokens)
             for row in rows:
                 destination.write(json.dumps(scorer.score(row), allow_nan=False) + "\n")
+                destination.flush()
+        elif backend is not None and args.mode == "direct":
+            # DecisionBackend protocol path: the backend owns model loading
+            # and batch scoring; rows keep their input order.
+            for result in backend.score_rows(rows, args.max_tokens):
+                destination.write(json.dumps(result, allow_nan=False) + "\n")
                 destination.flush()
         else:
             scorer = direct if args.mode == "direct" else reranker_score
