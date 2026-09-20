@@ -88,16 +88,43 @@ class NanoVLLMBackend:
             "nanovllm_model_revision": getattr(self.engine.config, "model_revision", None),
         }
 
+    # Padded tokens (rows x max length) per prefill chunk. Bounds activation
+    # memory so arbitrarily large inputs are chunked instead of OOMing.
+    PREFILL_TOKEN_BUDGET = 131072
+
     def score_rows(self, rows: list[dict], max_tokens: int) -> list[dict]:
         started = time.perf_counter()
         encoded = [encode_prompt(self.tokenizer, row, max_tokens) for row in rows]
+        # Greedy packing: fill each chunk while rows x chunk max length stays
+        # under the padded-token budget.
+        chunks = []
+        current = []
+        current_max = 0
+        for entry in encoded:
+            length = len(entry[0])
+            if current and (len(current) + 1) * max(current_max, length) > self.PREFILL_TOKEN_BUDGET:
+                chunks.append(current)
+                current, current_max = [], 0
+            current.append(entry)
+            current_max = max(current_max, length)
+        if current:
+            chunks.append(current)
+
         forward_start = time.perf_counter()
-        result = self.engine.prefill_last_logits(
-            [ids for ids, _, _ in encoded],
-            candidate_token_ids=[slots for _, slots, _ in encoded],
-        )
+        logits = []
+        batch_log = []
+        for chunk in chunks:
+            chunk_start = time.perf_counter()
+            result = self.engine.prefill_last_logits(
+                [ids for ids, _, _ in chunk],
+                candidate_token_ids=[slots for _, slots, _ in chunk],
+            )
+            batch_log.append({
+                "batch_rows": len(chunk),
+                "forward_seconds": time.perf_counter() - chunk_start,
+            })
+            logits.extend(result["logits"].tolist())
         forward_seconds = time.perf_counter() - forward_start
-        logits = result["logits"].tolist()
         outputs = []
         for row, (ids, slots, prompt_hash), row_logits in zip(rows, encoded, logits):
             outputs.append({
@@ -112,6 +139,7 @@ class NanoVLLMBackend:
                 "prompt_version": PROMPT_VERSION,
                 "model": self.model_info,
                 "backend": "nanovllm",
+                "prefill_batches": batch_log,
                 "readout": "prefill last-position candidate logits from the nano-vLLM engine",
                 "probability_status": "conditional option score; uncalibrated as decision confidence",
             })

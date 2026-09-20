@@ -1,0 +1,47 @@
+{
+  "version": "backend-compare-v1",
+  "mode": "reranker",
+  "input": "benchmarks/data/authored144.jsonl",
+  "input_sha256": "8162d1c73f925af64453f1ec05ef36d583b3815bf698e60f0d454bd11537e079",
+  "model": {
+    "source": "/mnt/nas-tbt/tbt/checkpoint/hf_cache/Qwen3-Reranker-0.6B",
+    "revision": "local-compare-reranker"
+  },
+  "hardware": "NVIDIA H20",
+  "timing_scope": "Warm model; median of N timed passes, each covering prompt construction, tokenization, transfers, forwards, and CPU readout over all rows.",
+  "runs": 3,
+  "alignment": {
+    "rows": 144,
+    "argmax_agreement": 0.9652777777777778,
+    "decisive_rows": 113,
+    "decisive_argmax_agreement": 0.9823008849557522,
+    "near_tie_disagreements": 3,
+    "near_tie_margin": 0.1,
+    "max_abs_logit_diff": 0.4375000676289478,
+    "max_abs_prob_diff": 0.08501388100481366,
+    "prompt_hash_match": "432/432"
+  },
+  "timing": {
+    "torch": {
+      "median_seconds": 2.931287513114512,
+      "all_seconds": [
+        2.931287513114512,
+        2.7746772645041347,
+        3.017622135579586
+      ],
+      "decisions_per_second": 49.12517088676814,
+      "forward_seconds": 0.017678305506706238
+    },
+    "nanovllm": {
+      "median_seconds": 0.568121992982924,
+      "all_seconds": [
+        0.5715064695104957,
+        0.5678820107132196,
+        0.568121992982924
+      ],
+      "decisions_per_second": 253.46668810325073,
+      "forward_seconds": 0.4670999050140381
+    },
+    "speedup": 5.159609290469094
+  }
+}

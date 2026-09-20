@@ -14,12 +14,18 @@ pipeline to a prefill-only inference engine and extends it with image evidence.
   deterministic `prefill_last_logits` API, instead of one full forward per row.
   The engine runs in `prefill_only_mode` (no sampling, no decode, no KV cache).
 - **Image evidence in the decision schema** (`src/semif_phase1/core.py`): rows
-  may carry local image files under `state.images`; URLs are rejected, and every
-  result records the SHA-256 of each image. Text-only rows are unchanged.
+  may carry images under `state.images` as local files, inline bytes, or
+  http(s) URLs; every result records the SHA-256 of each image. Text-only
+  rows are unchanged.
 - **nano-vllm multimodal backend** (`NanoVLLMMultimodalBackend`): mixed batches
   of image rows and text-only rows are scored in one batched prefill via
   `prefill_last_logits_multimodal`; a text-only row in the batch does not
   disturb the image rows.
+- **nano-vllm reranker backend** (`NanoVLLMRerankerBackend`): all (row, option)
+  pairs across the whole input are scored in one batched prefill through the
+  Qwen3-Reranker / Qwen3-VL-Reranker yes/no readout, reusing the torch
+  reranker's prompt encoding byte for byte. Image rows route to the
+  Qwen3-VL-Reranker automatically.
 
 ## Usage
 
@@ -28,13 +34,21 @@ pipeline to a prefill-only inference engine and extends it with image evidence.
 CUDA_VISIBLE_DEVICES=0 python -m semif_phase1.cli --mode direct --backend nanovllm \
   --model <path-to-Qwen3-0.6B> --revision <pinned-revision> \
   --input examples/decisions.jsonl --output results.jsonl
+
+# Native yes/no reranker readout, all pairs in one batched prefill
+CUDA_VISIBLE_DEVICES=0 python -m semif_phase1.cli --mode reranker --backend nanovllm \
+  --model <path-to-Qwen3-Reranker-0.6B> --revision <pinned-revision> \
+  --input examples/decisions.jsonl --output results.jsonl
 ```
 
 Install the engine with `pip install <nano-vllm-prefillonly checkout>` before
-running (`--mode direct` only).
+running (`--mode direct` and `--mode reranker`; serial/shared KV-reuse modes
+are not implemented by the engine yet). Large inputs are chunked by a padded-
+token budget inside the backend, so batch size does not bound input size.
 
 Multimodal rows use the same CLI; a batch is routed to the multimodal backend
-when any row carries `state.images`:
+(direct) or the Qwen3-VL-Reranker (reranker) when any row carries
+`state.images`:
 
 ```json
 {
@@ -48,15 +62,50 @@ when any row carries `state.images`:
 }
 ```
 
-## Verified end-to-end (single GPU)
+## Backend comparison: nano-vllm prefill vs the original torch backend
 
-- **Text**: Qwen3-0.6B on `examples/decisions.jsonl` — all 3 decisions scored,
-  argmax agrees with the torch backend; logit differences are BF16 kernel-level
-  noise (solo vs batch within the engine is stable).
-- **Multimodal**: Qwen3-VL-2B on a mixed batch (two image rows with identical
-  text but different images, plus one text-only row) — the image rows answer
-  red/blue correctly per their images, and the text-only row is scored in the
-  same batch without disturbing them.
+Same weights, same prompts (prompt hashes match byte for byte on every row),
+same GPU (one H20), warm model, median of 3 passes. `benchmarks/backend_compare.py`
+reproduces every number below; raw reports are committed under
+`results/raw/backend-compare-*.json`.
+
+**Speed (wall clock over the whole input)**
+
+| Mode | Model | Fixture | torch | nano-vllm | Speedup |
+|---|---|---|---:|---:|---:|
+| direct | Qwen3.5-4B | authored144 (short rows) | 6.18 s | 1.82 s | **3.4×** |
+| direct | Qwen3.5-4B | shape777 (~2k-token rows) | 115.2 s | 112.0 s | 1.03× |
+| reranker | Qwen3-Reranker-0.6B | authored144 (short rows) | 2.93 s | 0.57 s | **5.2×** |
+| reranker | Qwen3-Reranker-0.6B | shape777 (~2k-token rows) | 66.1 s | 29.8 s | **2.2×** |
+
+The speedup comes from replacing the torch path's per-row forwards with one
+batched prefill over all rows (reranker: over all row×option pairs). On short
+rows the win is 3–5×; on very long rows the per-row forward already saturates
+the GPU and the gap closes — batched prefill matches it at worst. The reranker
+path keeps a 2.2× even on long rows because the torch path still runs one
+forward per row.
+
+**Accuracy (row-level alignment, same weights)**
+
+| Mode | Fixture | argmax agreement | decisive rows¹ | max logit diff | prompt hashes |
+|---|---|---:|---:|---:|---|
+| direct | authored144 | 99.3% | 100% | 0.25 | 144/144 |
+| direct | shape777 | 99.4% | 99.9% | 0.38 | 777/777 |
+| reranker | authored144 | 96.5% | 98.2% | 0.44 | 432/432 |
+| reranker | shape777 | 85.7% | 94.7% | 1.91 | 1554/1554 |
+
+¹ Rows where the torch path itself is decided (top-two probability gap ≥ 0.1);
+near-tie flips carry little signal and are counted separately in the reports.
+
+Identical prompts (hashes match on every row) with different attention kernels
+(SDPA vs the engine's prefill kernels) produce BF16-level logit drift; where
+that drift crosses a near-tie, argmax can flip. On decided rows the two
+backends agree 94.7–100% of the time, and the reranker disagreements
+concentrate in rows whose two leading options are close in probability.
+
+Beyond these two modes, the nano-vllm backend adds capabilities the torch
+backend does not have: multimodal image evidence in direct mode, and the
+Qwen3-VL-Reranker in reranker mode (mixed image/text batches in one prefill).
 
 Known limitation: Qwen3.5 (GDN linear attention) batched prefill is numerically
 inequivalent to single-sequence prefill in the engine; tracked in the engine's
