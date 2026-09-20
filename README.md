@@ -107,10 +107,10 @@ Beyond these two modes, the nano-vllm backend adds capabilities the torch
 backend does not have: multimodal image evidence in direct mode, and the
 Qwen3-VL-Reranker in reranker mode (mixed image/text batches in one prefill).
 
-Known limitation: Qwen3.5 (GDN linear attention) batched prefill is numerically
-inequivalent to single-sequence prefill in the engine; tracked in the engine's
-issue log and fixed separately. Use Qwen3 / Qwen3-VL / Qwen2.5-VL with this
-backend.
+The direct-mode benchmark above runs on Qwen3.5-4B: the engine's earlier
+GDN (linear attention) non-determinism — a racy Triton autotune config in the
+kkt kernel — was fixed by pinning BK=128 (= head_k_dim); batch-invariance and
+bit-determinism tests now pass in the engine's suite.
 
 Tests: `tests/test_nanovllm_backend.py` and `tests/test_multimodal_schema.py`
 (skip automatically without the package or a GPU).
