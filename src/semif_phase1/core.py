@@ -15,6 +15,48 @@ DIRECT_SYSTEM = (
 )
 
 
+def _validate_images(images) -> None:
+    """Validate the multimodal branch of state: local images only.
+
+    Remote URLs are rejected so scoring never triggers implicit network
+    requests; callers that want remote images download and pin them first.
+    """
+    if not isinstance(images, list) or not images:
+        raise ValueError("state.images must be a nonempty list when present")
+    for image in images:
+        if not isinstance(image, dict):
+            raise ValueError("Each image must be an object with a path or bytes field")
+        has_path = bool(isinstance(image.get("path"), str) and image["path"])
+        has_bytes = bool(isinstance(image.get("bytes"), (bytes, bytearray)) and image.get("format"))
+        if not (has_path ^ has_bytes):
+            raise ValueError("Each image needs exactly one of: local path, or bytes with format")
+        if has_path and re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", image["path"]):
+            raise ValueError(f"Image paths must be local files, not URLs: {image['path']!r}")
+        if has_path and not Path(image["path"]).is_file():
+            raise ValueError(f"Image file not found: {image['path']!r}")
+
+
+def row_images(row: dict) -> list[dict]:
+    """Return the multimodal image entries of a validated row, or []."""
+    state = row["state"]
+    if isinstance(state, dict) and "images" in state:
+        _validate_images(state["images"])
+        return state["images"]
+    return []
+
+
+def image_digest(image: dict) -> str:
+    """SHA-256 over the image payload, independent of path or transport."""
+    if isinstance(image.get("bytes"), (bytes, bytearray)):
+        return hashlib.sha256(image["bytes"]).hexdigest()
+    path = Path(image["path"])
+    digest_ = hashlib.sha256()
+    with path.open("rb") as source:
+        for chunk in iter(lambda: source.read(1 << 20), b""):
+            digest_.update(chunk)
+    return digest_.hexdigest()
+
+
 def validate_row(row: dict) -> None:
     required = {"id", "state", "question", "options"}
     if not required <= row.keys():
@@ -24,10 +66,17 @@ def validate_row(row: dict) -> None:
     state = row["state"]
     if not isinstance(state, (str, dict, list)) or not state:
         raise ValueError("state must be a nonempty string, object, or array")
-    try:
-        json.dumps(state, ensure_ascii=False, allow_nan=False)
-    except (TypeError, ValueError) as error:
-        raise ValueError("state must be finite JSON-compatible data") from error
+    if isinstance(state, dict) and "images" in state:
+        # Multimodal rows carry structured evidence; validate the images and
+        # skip the JSON-serialization text path entirely.
+        _validate_images(state["images"])
+        if not isinstance(state.get("text"), (str, type(None))):
+            raise ValueError("state.text, when present, must be a string")
+    else:
+        try:
+            json.dumps(state, ensure_ascii=False, allow_nan=False)
+        except (TypeError, ValueError) as error:
+            raise ValueError("state must be finite JSON-compatible data") from error
     options = row["options"]
     if not isinstance(options, list) or not 2 <= len(options) <= len(LETTERS):
         raise ValueError("options must contain 2-16 entries")
