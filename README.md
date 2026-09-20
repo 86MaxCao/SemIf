@@ -25,11 +25,13 @@ pipeline to a prefill-only inference engine and extends it with image evidence.
 
 ```bash
 # Text decisions, batched prefill
-CUDA_VISIBLE_DEVICES=0 PYTHONPATH=src:<nano-vllm-prefillonly checkout> \
-python -m semif_phase1.cli --mode direct --backend nanovllm \
+CUDA_VISIBLE_DEVICES=0 python -m semif_phase1.cli --mode direct --backend nanovllm \
   --model <path-to-Qwen3-0.6B> --revision <pinned-revision> \
   --input examples/decisions.jsonl --output results.jsonl
 ```
+
+Install the engine with `pip install <nano-vllm-prefillonly checkout>` before
+running (`--mode direct` only).
 
 Multimodal rows use the same CLI; a batch is routed to the multimodal backend
 when any row carries `state.images`:
@@ -45,10 +47,6 @@ when any row carries `state.images`:
   ]
 }
 ```
-
-Requirements: a [nano-vllm-prefillonly](https://github.com/86MaxCao/nano-vllm-prefillonly)
-checkout, one NVIDIA GPU, and a VLM (e.g. Qwen3-VL) for image rows. Image paths must be local
-files. `--mode direct` only.
 
 ## Verified end-to-end (single GPU)
 
