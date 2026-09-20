@@ -6,7 +6,7 @@ import argparse
 import json
 from pathlib import Path
 
-from .core import validate_row
+from .core import row_images, validate_row
 from .backends import TorchDirectBackend
 from .reranker import score as reranker_score
 from .serial import SerialPrefixScorer
@@ -54,9 +54,12 @@ def main() -> None:
         direct, serial, shared = mlx_backend.score, mlx_backend.SerialPrefixScorer, mlx_backend.score_shared
         backend = None
     elif args.backend == "nanovllm":
-        from .backends import NanoVLLMBackend
+        from .backends import NanoVLLMBackend, NanoVLLMMultimodalBackend
 
-        backend = NanoVLLMBackend(args.model, args.revision)
+        if any(row_images(row) for row in rows):
+            backend = NanoVLLMMultimodalBackend(args.model, args.revision)
+        else:
+            backend = NanoVLLMBackend(args.model, args.revision)
         model = tokenizer = None
         metadata = backend.model_info
     else:

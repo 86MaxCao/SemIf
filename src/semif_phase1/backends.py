@@ -9,13 +9,21 @@ normalization stay in this package).
 
 from __future__ import annotations
 
+import json
 import re
 import time
 from pathlib import Path
 from typing import Protocol
 
-from .core import load_causal_model, softmax
-from .direct import PROMPT_VERSION, encode_prompt, score as direct_score
+from .core import (
+    digest,
+    load_causal_model,
+    multimodal_messages,
+    row_images,
+    image_digest,
+    softmax,
+)
+from .direct import PROMPT_VERSION, _slot_ids, encode_prompt, score as direct_score
 
 
 class DecisionBackend(Protocol):
@@ -102,6 +110,103 @@ class NanoVLLMBackend:
                 "prompt_version": PROMPT_VERSION,
                 "model": self.model_info,
                 "backend": "nanovllm",
+                "readout": "prefill last-position candidate logits from the nano-vLLM engine",
+                "probability_status": "conditional option score; uncalibrated as decision confidence",
+            })
+        return outputs
+
+
+def _load_pil_image(image: dict):
+    """Decode one validated image entry (path or bytes) with PIL."""
+    from io import BytesIO
+
+    from PIL import Image
+
+    if isinstance(image.get("bytes"), (bytes, bytearray)):
+        return Image.open(BytesIO(image["bytes"])).convert("RGB")
+    return Image.open(image["path"]).convert("RGB")
+
+
+class NanoVLLMMultimodalBackend:
+    """nano-vLLM multimodal prefill: images plus text, candidate logits only.
+
+    Requires the nano-vLLM ``prefill_last_logits_multimodal`` API. Rows may
+    mix text and image evidence; both read out the same answer-slot
+    contract (single uppercase-letter tokens).
+    """
+
+    def __init__(self, source: str, revision: str):
+        _require_pinned_revision(source, revision)
+        try:
+            from nanovllm import LLM
+        except ImportError as error:
+            raise RuntimeError(
+                "The nanovllm backend requires the nano-vllm-prefillonly package"
+            ) from error
+        self.engine = LLM(
+            source,
+            revision=revision,
+            prefill_only_mode=True,
+            max_tokens_hint=1,
+        )
+        self.tokenizer = self.engine.tokenizer
+        self.model_info = {
+            "source": source,
+            "revision": revision,
+            "backend": "nanovllm",
+            "nanovllm_model_revision": getattr(self.engine.config, "model_revision", None),
+        }
+
+    def score_rows(self, rows: list[dict], max_tokens: int) -> list[dict]:
+        started = time.perf_counter()
+        requests = []
+        slots_per_row = []
+        hashes_per_row = []
+        prompt_hashes = []
+        for row in rows:
+            images = row_images(row)
+            hashes_per_row.append([image_digest(image) for image in images])
+            if images:
+                messages = multimodal_messages(row)
+                slots = _slot_ids(self.tokenizer, len(row["options"]))
+                slots_per_row.append(slots)
+                prompt_hashes.append(digest(json.dumps(messages, ensure_ascii=False, default=repr)))
+                requests.append({
+                    "messages": messages,
+                    "images": [_load_pil_image(image) for image in images],
+                })
+            else:
+                # Text rows reuse encode_prompt so ids, slot validation, and
+                # prompt hash match the text backend byte for byte.
+                ids, slots, prompt_hash = encode_prompt(self.tokenizer, row, max_tokens)
+                slots_per_row.append(slots)
+                prompt_hashes.append(prompt_hash)
+                requests.append({"input_ids": ids})
+        forward_start = time.perf_counter()
+        result = self.engine.prefill_last_logits_multimodal(
+            requests,
+            candidate_token_ids=slots_per_row,
+        )
+        forward_seconds = time.perf_counter() - forward_start
+        logits = result["logits"].tolist()
+        outputs = []
+        for row, slots, hashes, prompt_hash, row_logits in zip(
+            rows, slots_per_row, hashes_per_row, prompt_hashes, logits
+        ):
+            outputs.append({
+                "id": row["id"],
+                "option_ids": [option["id"] for option in row["options"]],
+                "probabilities": softmax(row_logits[: len(slots)]),
+                "option_logits": row_logits[: len(slots)],
+                "input_tokens": result["sequence_lengths"][len(outputs)],
+                "forward_seconds": forward_seconds,
+                "total_seconds": time.perf_counter() - started,
+                "prompt_sha256": prompt_hash,
+                "prompt_version": PROMPT_VERSION,
+                "model": self.model_info,
+                "backend": "nanovllm",
+                "modality": "vision-language" if hashes else "text",
+                "image_hashes": hashes,
                 "readout": "prefill last-position candidate logits from the nano-vLLM engine",
                 "probability_status": "conditional option score; uncalibrated as decision confidence",
             })

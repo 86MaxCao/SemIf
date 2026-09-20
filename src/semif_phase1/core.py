@@ -105,6 +105,41 @@ def direct_messages(row: dict) -> list[dict]:
     ]
 
 
+def multimodal_messages(row: dict) -> list[dict]:
+    """Chat messages for a multimodal row: images first, then the text payload.
+
+    The evidence payload mirrors direct_messages but serializes the state
+    without the image bytes themselves (paths/digests stand in), so the
+    answer-slot contract stays identical to the text path.
+    """
+    validate_row(row)
+    images = row_images(row)
+    if not images:
+        raise ValueError("multimodal_messages requires a row with state.images")
+    state = dict(row["state"]) if isinstance(row["state"], dict) else {}
+    evidence_state = dict(state)
+    evidence_state["images"] = [
+        {k: v for k, v in image.items() if k != "bytes"} | {"sha256": image_digest(image)}
+        for image in images
+    ]
+    payload = {
+        "evidence": evidence_state,
+        "criterion": row["question"],
+        "options": [
+            {"letter": LETTERS[index], "description": option["description"]}
+            for index, option in enumerate(row["options"])
+        ],
+    }
+    content = [
+        {"type": "image", "image": image} for image in images
+    ]
+    content.append({"type": "text", "text": json.dumps(payload, ensure_ascii=False)})
+    return [
+        {"role": "system", "content": DIRECT_SYSTEM},
+        {"role": "user", "content": content},
+    ]
+
+
 def softmax(values: list[float]) -> list[float]:
     if len(values) < 2 or any(not math.isfinite(value) for value in values):
         raise ValueError("Need at least two finite scores")
