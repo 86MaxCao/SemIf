@@ -7,6 +7,7 @@ import json
 import math
 import re
 from pathlib import Path
+from urllib.request import urlopen
 
 LETTERS = "ABCDEFGHIJKLMNOP"
 DIRECT_SYSTEM = (
@@ -16,10 +17,10 @@ DIRECT_SYSTEM = (
 
 
 def _validate_images(images) -> None:
-    """Validate the multimodal branch of state: local images only.
+    """Validate the multimodal branch of state.
 
-    Remote URLs are rejected so scoring never triggers implicit network
-    requests; callers that want remote images download and pin them first.
+    Images may be local files, inline bytes, or http(s) URLs. Other URL
+    schemes are rejected.
     """
     if not isinstance(images, list) or not images:
         raise ValueError("state.images must be a nonempty list when present")
@@ -31,8 +32,9 @@ def _validate_images(images) -> None:
         if not (has_path ^ has_bytes):
             raise ValueError("Each image needs exactly one of: local path, or bytes with format")
         if has_path and re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", image["path"]):
-            raise ValueError(f"Image paths must be local files, not URLs: {image['path']!r}")
-        if has_path and not Path(image["path"]).is_file():
+            if not re.match(r"^https?://", image["path"]):
+                raise ValueError(f"Only http(s) image URLs are supported: {image['path']!r}")
+        elif has_path and not Path(image["path"]).is_file():
             raise ValueError(f"Image file not found: {image['path']!r}")
 
 
@@ -45,16 +47,20 @@ def row_images(row: dict) -> list[dict]:
     return []
 
 
+def image_payload(image: dict) -> bytes:
+    """Raw image bytes for any validated source: bytes entry, local file, or http(s) URL."""
+    if isinstance(image.get("bytes"), (bytes, bytearray)):
+        return bytes(image["bytes"])
+    path = image["path"]
+    if re.match(r"^https?://", path):
+        with urlopen(path, timeout=30) as response:
+            return response.read()
+    return Path(path).read_bytes()
+
+
 def image_digest(image: dict) -> str:
     """SHA-256 over the image payload, independent of path or transport."""
-    if isinstance(image.get("bytes"), (bytes, bytearray)):
-        return hashlib.sha256(image["bytes"]).hexdigest()
-    path = Path(image["path"])
-    digest_ = hashlib.sha256()
-    with path.open("rb") as source:
-        for chunk in iter(lambda: source.read(1 << 20), b""):
-            digest_.update(chunk)
-    return digest_.hexdigest()
+    return hashlib.sha256(image_payload(image)).hexdigest()
 
 
 def validate_row(row: dict) -> None:

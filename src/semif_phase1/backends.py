@@ -21,6 +21,7 @@ from .core import (
     multimodal_messages,
     row_images,
     image_digest,
+    image_payload,
     softmax,
 )
 from .direct import PROMPT_VERSION, _slot_ids, encode_prompt, score as direct_score
@@ -117,14 +118,12 @@ class NanoVLLMBackend:
 
 
 def _load_pil_image(image: dict):
-    """Decode one validated image entry (path or bytes) with PIL."""
+    """Decode one validated image entry (bytes, local path, or http(s) URL) with PIL."""
     from io import BytesIO
 
     from PIL import Image
 
-    if isinstance(image.get("bytes"), (bytes, bytearray)):
-        return Image.open(BytesIO(image["bytes"])).convert("RGB")
-    return Image.open(image["path"]).convert("RGB")
+    return Image.open(BytesIO(image_payload(image))).convert("RGB")
 
 
 class NanoVLLMMultimodalBackend:

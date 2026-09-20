@@ -44,9 +44,14 @@ def test_empty_images_rejected():
         validate_row(_row({"text": "no evidence", "images": []}))
 
 
-def test_url_images_rejected():
-    with pytest.raises(ValueError, match="not URLs"):
-        validate_row(_row({"images": [{"path": "https://example.com/a.jpg"}]}))
+def test_http_url_images_accepted():
+    validate_row(_row({"images": [{"path": "https://example.com/a.jpg"}]}))
+    validate_row(_row({"images": [{"path": "http://example.com/a.jpg"}]}))
+
+
+def test_non_http_url_images_rejected():
+    with pytest.raises(ValueError, match="Only http"):
+        validate_row(_row({"images": [{"path": "ftp://example.com/a.jpg"}]}))
 
 
 def test_missing_image_file_rejected(tmp_path):
@@ -68,6 +73,28 @@ def test_image_digest_stable_across_path_and_bytes(tmp_path):
     image = tmp_path / "a.jpg"
     image.write_bytes(payload)
     assert image_digest({"path": str(image)}) == image_digest({"bytes": payload})
+
+
+class _StubResponse:
+    def __init__(self, body):
+        self._body = body
+
+    def read(self):
+        return self._body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+def test_image_digest_stable_across_url(monkeypatch):
+    import semif_phase1.core as core
+
+    payload = b"\xff\xd8urlbytes"
+    monkeypatch.setattr(core, "urlopen", lambda url, timeout=30: _StubResponse(payload))
+    assert image_digest({"path": "https://example.com/a.jpg"}) == image_digest({"bytes": payload})
 
 
 def test_image_digest_writes_nothing():
