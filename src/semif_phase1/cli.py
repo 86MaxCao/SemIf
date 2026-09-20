@@ -16,7 +16,7 @@ from .shared import score_shared
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--mode", choices=("direct", "serial", "shared", "reranker"), required=True)
-    parser.add_argument("--backend", choices=("torch", "mlx"), default="torch")
+    parser.add_argument("--backend", choices=("torch", "mlx", "nanovllm"), default="torch")
     parser.add_argument("--mlx-bits", type=int, choices=(4, 8), help="Quantize MLX weights in memory; default preserves source precision")
     parser.add_argument("--mlx-cache-limit-mib", type=int,
                         help="MLX inactive allocation cache in MiB (default: 256; 0 disables caching)")
@@ -37,6 +37,8 @@ def main() -> None:
             parser.error("--mlx-cache-limit-mib must be nonnegative")
     if args.backend == "mlx" and args.mode == "reranker":
         parser.error("MLX supports direct, serial, and shared modes; reranker requires torch")
+    if args.backend == "nanovllm" and args.mode != "direct":
+        parser.error("The nanovllm backend supports direct mode only")
     rows = [json.loads(line) for line in args.input.read_text().splitlines() if line.strip()]
     if not rows:
         parser.error("Input is empty")
@@ -51,6 +53,12 @@ def main() -> None:
             args.model, args.revision, args.mlx_bits, cache_limit_mib=cache_limit_mib)
         direct, serial, shared = mlx_backend.score, mlx_backend.SerialPrefixScorer, mlx_backend.score_shared
         backend = None
+    elif args.backend == "nanovllm":
+        from .backends import NanoVLLMBackend
+
+        backend = NanoVLLMBackend(args.model, args.revision)
+        model = tokenizer = None
+        metadata = backend.model_info
     else:
         backend = TorchDirectBackend(args.model, args.revision)
         model, tokenizer, metadata = backend.model, backend.tokenizer, backend.model_info
