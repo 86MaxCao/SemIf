@@ -10,7 +10,7 @@ pipeline to a prefill-only inference engine and extends it with image evidence.
   owns model loading and batch scoring; rows keep their input order.
 - **nano-vllm text backend** (`NanoVLLMBackend`): scores whole batches with a
   single batched prefill through
-  [nano-vllm-prefillonly](https://github.com/GeeeekExplorer/nano-vllm)'s
+  [nano-vllm-prefillonly](https://github.com/86MaxCao/nano-vllm-prefillonly)'s
   deterministic `prefill_last_logits` API, instead of one full forward per row.
   The engine runs in `prefill_only_mode` (no sampling, no decode, no KV cache).
 - **Image evidence in the decision schema** (`src/semif_phase1/core.py`): rows
@@ -46,7 +46,7 @@ when any row carries `state.images`:
 }
 ```
 
-Requirements: the [nano-vllm-prefillonly](https://github.com/GeeeekExplorer/nano-vllm)
+Requirements: the [nano-vllm-prefillonly](https://github.com/86MaxCao/nano-vllm-prefillonly)
 checkout with the `prefill_last_logits` APIs (commit `4a99916` or later), one
 NVIDIA GPU, and a VLM (e.g. Qwen3-VL) for image rows. Image paths must be local
 files. `--mode direct` only.
@@ -109,7 +109,7 @@ serial prefix reuse, and parallel shared-state decisions on macOS arm64.
 Install `pip install -e '.[test,mlx]'` and add `--backend mlx` to the scorer command.
 
 **NVIDIA prefill engine:** add `--backend nanovllm` (direct mode only) to score whole
-batches with one prefill per batch through [nano-vllm-prefillonly](https://github.com/GeeeekExplorer/nano-vllm),
+batches with one prefill per batch through [nano-vllm-prefillonly](https://github.com/86MaxCao/nano-vllm-prefillonly),
 instead of one full forward per row. It requires the engine's deterministic
 `prefill_last_logits` API and the same pinned revision rules; the parity tests skip
 automatically when the package or a GPU is absent. Rows may also carry image evidence:
