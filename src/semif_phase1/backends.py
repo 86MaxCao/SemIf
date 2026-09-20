@@ -25,6 +25,7 @@ from .core import (
     softmax,
 )
 from .direct import PROMPT_VERSION, _slot_ids, encode_prompt, score as direct_score
+from .reranker import DECISION_INSTRUCTION, RETRIEVAL_INSTRUCTION
 
 
 class DecisionBackend(Protocol):
@@ -215,12 +216,13 @@ class NanoVLLMMultimodalBackend:
 class NanoVLLMRerankerBackend:
     """nano-vLLM reranker prefill: native yes/no log-odds per option.
 
-    Reuses the torch reranker's prompt encoding byte for byte, so prompt
-    hashes and audit records stay comparable across backends. All pairs
-    of all rows are scored in one batched prefill via ``rerank_ids``.
+    Text rows reuse the torch reranker's prompt encoding byte for byte, so
+    prompt hashes and audit records stay comparable across backends. Image
+    rows (Qwen3-VL-Reranker) attach the row's images to the pair. All pairs
+    of all rows are scored in one batched prefill.
     """
 
-    def __init__(self, source: str, revision: str):
+    def __init__(self, source: str, revision: str, multimodal: bool = False):
         _require_pinned_revision(source, revision)
         try:
             from nanovllm import LLM
@@ -228,11 +230,12 @@ class NanoVLLMRerankerBackend:
             raise RuntimeError(
                 "The nanovllm backend requires the nano-vllm-prefillonly package"
             ) from error
+        self.multimodal = multimodal
         self.engine = LLM(
             source,
             revision=revision,
             is_reranker=True,
-            reranker_type="qwen3",
+            reranker_type="qwen3_vl" if multimodal else "qwen3",
             prefill_only_mode=True,
             max_tokens_hint=1,
         )
@@ -250,14 +253,54 @@ class NanoVLLMRerankerBackend:
         from .reranker import _encode, PROMPT_VERSION as RERANKER_PROMPT_VERSION
 
         started = time.perf_counter()
-        specs = []  # (row_index, option_index, ids, prompt_hash)
+        specs = []  # (row_index, option_index, ids, prompt_hash, images)
         for row_index, row in enumerate(rows):
+            images = row_images(row)
             for option_index, option in enumerate(row["options"]):
                 ids, prompt_hash = _encode(self.tokenizer, row, option, max_tokens)
-                specs.append((row_index, option_index, ids, prompt_hash))
+                specs.append((row_index, option_index, ids, prompt_hash, images))
 
         forward_start = time.perf_counter()
-        scores = self.engine.rerank_ids([ids for _, _, ids, _ in specs]).float().tolist()
+        if self.multimodal:
+            # rerank_batch builds the Qwen3-VL template itself: query/doc
+            # text plus this pair's images (None keeps the pair text-only).
+            # The audit hash therefore covers the pair text actually sent,
+            # not the text-mode template from _encode.
+            pairs = []
+            pair_images = []
+            pair_hashes = []
+            for row_index, option_index, ids, _ids_hash, images in specs:
+                row = rows[row_index]
+                option = row["options"][option_index]
+                experiment = row.get("provenance", {}).get("experiment")
+                instruction = (
+                    RETRIEVAL_INSTRUCTION
+                    if experiment in {"code-rag", "company-brain"}
+                    else DECISION_INSTRUCTION
+                )
+                query = (
+                    f"Question: {row['question']}\n"
+                    f"Candidate answer: {option['description']}"
+                )
+                state = row["state"]
+                if isinstance(state, dict):
+                    state_text = state.get("text") or ""
+                else:
+                    state_text = str(state)
+                doc = f"<Instruct>: {instruction}\n{state_text}"
+                pairs.append((query, doc))
+                pair_hashes.append(digest(f"{query}\n{doc}"))
+                if images:
+                    pair_images.append([_load_pil_image(image) for image in images])
+                else:
+                    pair_images.append(None)
+            specs = [
+                (spec[0], spec[1], spec[2], pair_hashes[i], spec[4])
+                for i, spec in enumerate(specs)
+            ]
+            scores = self.engine.rerank_batch(pairs, images=pair_images).float().tolist()
+        else:
+            scores = self.engine.rerank_ids([s[2] for s in specs]).float().tolist()
         forward_seconds = time.perf_counter() - forward_start
 
         # The engine returns sigmoid(log_odds); invert to log_odds so the
@@ -287,7 +330,7 @@ class NanoVLLMRerankerBackend:
             }
             for row in rows
         ]
-        for (row_index, option_index, ids, prompt_hash), score in zip(specs, scores):
+        for (row_index, option_index, ids, prompt_hash, _images), score in zip(specs, scores):
             result = results[row_index]
             odds = log_odds(score)
             option_count = len(rows[row_index]["options"])

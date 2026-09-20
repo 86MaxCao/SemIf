@@ -44,8 +44,6 @@ def main() -> None:
         parser.error("Input is empty")
     for row in rows:
         validate_row(row)
-    if args.backend == "nanovllm" and args.mode == "reranker" and any(row_images(row) for row in rows):
-        parser.error("The nanovllm reranker backend does not support image rows")
     if args.backend == "mlx":
         from . import mlx_backend
 
@@ -59,7 +57,10 @@ def main() -> None:
         if args.mode == "reranker":
             from .backends import NanoVLLMRerankerBackend
 
-            backend = NanoVLLMRerankerBackend(args.model, args.revision)
+            backend = NanoVLLMRerankerBackend(
+                args.model, args.revision,
+                multimodal=any(row_images(row) for row in rows),
+            )
         elif any(row_images(row) for row in rows):
             from .backends import NanoVLLMMultimodalBackend
 
