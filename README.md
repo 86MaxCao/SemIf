@@ -35,6 +35,27 @@ This baseline reads typed option probabilities directly from a model. No answer 
 serial prefix reuse, and parallel shared-state decisions on macOS arm64.
 Install `pip install -e '.[test,mlx]'` and add `--backend mlx` to the scorer command.
 
+**NVIDIA prefill engine:** add `--backend nanovllm` (direct mode only) to score whole
+batches with one prefill per batch through [nano-vllm-prefillonly](https://github.com/GeeeekExplorer/nano-vllm),
+instead of one full forward per row. It requires the engine's deterministic
+`prefill_last_logits` API and the same pinned revision rules; the parity tests skip
+automatically when the package or a GPU is absent. Rows may also carry image evidence:
+
+```json
+{
+  "id": "scene-1",
+  "state": {"text": "Judge the road layout.", "images": [{"path": "images/intersection.jpg"}]},
+  "question": "Which road is wider?",
+  "options": [
+    {"id": "left", "description": "Left road"},
+    {"id": "right", "description": "Right road"}
+  ]
+}
+```
+
+Image paths must be local files (URLs are rejected) and each result records the
+SHA-256 of every image. Text-only rows keep their exact prompts and hashes.
+
 Python 3.10+, CUDA, and a GPU that can hold a 4B BF16 model:
 
 ```bash
