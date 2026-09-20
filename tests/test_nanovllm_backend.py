@@ -8,6 +8,7 @@ validation tests run everywhere.
 import json
 
 import pytest
+from transformers import AutoTokenizer
 
 from semif_phase1.backends import NanoVLLMBackend, _require_pinned_revision
 from semif_phase1.core import image_digest, multimodal_messages
@@ -27,8 +28,8 @@ def test_local_model_requires_manifest_revision(tmp_path):
     _require_pinned_revision(str(source), "local-manifest-1")
 
 
-@pytest.mark.parametrize("mode", ["serial", "shared", "reranker"])
-def test_nanovllm_backend_rejects_non_direct_modes(tmp_path, monkeypatch, capsys, mode):
+@pytest.mark.parametrize("mode", ["serial", "shared"])
+def test_nanovllm_backend_rejects_kv_cache_modes(tmp_path, monkeypatch, capsys, mode):
     import json
     import sys
 
@@ -47,7 +48,38 @@ def test_nanovllm_backend_rejects_non_direct_modes(tmp_path, monkeypatch, capsys
     with pytest.raises(SystemExit) as error:
         main()
     assert error.value.code == 2
-    assert "direct mode only" in capsys.readouterr().err
+    assert "direct and reranker modes only" in capsys.readouterr().err
+    assert not (tmp_path / "out.jsonl").exists()
+
+
+def test_nanovllm_reranker_rejects_image_rows(tmp_path, monkeypatch, capsys):
+    import json
+    import sys
+
+    from semif_phase1.cli import main
+
+    image = tmp_path / "scene.jpg"
+    image.write_bytes(b"\xff\xd8first")
+    row = {
+        "id": "scene-1",
+        "state": {"text": "Judge the road layout.", "images": [{"path": str(image)}]},
+        "question": "Which road is wider?",
+        "options": [
+            {"id": "left", "description": "Left road"},
+            {"id": "right", "description": "Right road"},
+        ],
+    }
+    source = tmp_path / "input.jsonl"
+    source.write_text(json.dumps(row) + "\n")
+    monkeypatch.setattr(sys, "argv", [
+        "semif-score", "--backend", "nanovllm", "--mode", "reranker",
+        "--model", "unused", "--revision", "a" * 40,
+        "--input", str(source), "--output", str(tmp_path / "out.jsonl"),
+    ])
+    with pytest.raises(SystemExit) as error:
+        main()
+    assert error.value.code == 2
+    assert "does not support image rows" in capsys.readouterr().err
     assert not (tmp_path / "out.jsonl").exists()
 
 
@@ -191,3 +223,72 @@ def test_cli_routes_multimodal_rows_to_multimodal_backend(tmp_path, monkeypatch)
     cli.main()
     assert selected["cls"] == "NanoVLLMMultimodalBackend"
     assert json.loads(output.read_text()) == {"id": "scene-1"}
+
+
+def test_nanovllm_reranker_backend_score_rows():
+    """Scoring logic with a stubbed engine: pair expansion, sigmoid inversion,
+    and the torch-reranker output schema."""
+    import math
+
+    pytest.importorskip("transformers")
+
+    from semif_phase1.backends import NanoVLLMRerankerBackend
+    from semif_phase1.reranker import _encode
+
+    class StubEngine:
+        def __init__(self):
+            self.calls = []
+
+        def rerank_ids(self, input_ids):
+            self.calls.append(input_ids)
+            import torch
+            # Deliberately distinct sigmoid outputs in pair order.
+            return torch.tensor([0.9, 0.2, 0.8])
+
+    backend = NanoVLLMRerankerBackend.__new__(NanoVLLMRerankerBackend)
+    backend.engine = StubEngine()
+    backend.model_info = {"backend": "nanovllm"}
+    backend.tokenizer = AutoTokenizer.from_pretrained(
+        "/mnt/nas-tbt/tbt/checkpoint/hf_cache/Qwen3-Reranker-0.6B"
+    )
+
+    rows = [{
+        "id": "row-1",
+        "state": "The sensor logged a steady 22.4C for the last hour.",
+        "question": "Is the temperature stable?",
+        "options": [
+            {"id": "yes", "description": "Yes"},
+            {"id": "no", "description": "No"},
+            {"id": "unknown", "description": "Insufficient evidence"},
+        ],
+    }]
+
+    results = backend.score_rows(rows, 4096)
+    assert len(results) == 1
+    result = results[0]
+
+    # One rerank_ids call carrying every (row, option) pair.
+    expected_ids = [
+        _encode(backend.tokenizer, rows[0], option, 4096)[0]
+        for option in rows[0]["options"]
+    ]
+    assert backend.engine.calls == [expected_ids]
+
+    # Sigmoid inverted back to log-odds; softmax matches torch reranker output.
+    assert result["option_ids"] == ["yes", "no", "unknown"]
+    for odds, probability, score in zip(
+        result["option_logits"], result["probabilities"], (0.9, 0.2, 0.8)
+    ):
+        assert odds == pytest.approx(math.log(score / (1 - score)))
+    assert sum(result["probabilities"]) == pytest.approx(1.0)
+    assert result["independent_binary_relevance"] == pytest.approx([0.9, 0.2, 0.8])
+    # Prompt hashes are identical to the torch path's encoding.
+    assert result["option_prompt_sha256"] == [
+        _encode(backend.tokenizer, rows[0], option, 4096)[1]
+        for option in rows[0]["options"]
+    ]
+    assert result["prompt_version"] == "qwen3-reranker-native-options-v1"
+    assert result["backend"] == "nanovllm"
+    assert result["input_tokens"] == sum(len(ids) for ids in expected_ids)
+    assert result["max_option_input_tokens"] == max(len(ids) for ids in expected_ids)
+    assert result["pair_batches"][0]["pair_batch_size"] == 3

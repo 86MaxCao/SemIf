@@ -37,13 +37,15 @@ def main() -> None:
             parser.error("--mlx-cache-limit-mib must be nonnegative")
     if args.backend == "mlx" and args.mode == "reranker":
         parser.error("MLX supports direct, serial, and shared modes; reranker requires torch")
-    if args.backend == "nanovllm" and args.mode != "direct":
-        parser.error("The nanovllm backend supports direct mode only")
+    if args.backend == "nanovllm" and args.mode in ("serial", "shared"):
+        parser.error("The nanovllm backend supports direct and reranker modes only")
     rows = [json.loads(line) for line in args.input.read_text().splitlines() if line.strip()]
     if not rows:
         parser.error("Input is empty")
     for row in rows:
         validate_row(row)
+    if args.backend == "nanovllm" and args.mode == "reranker" and any(row_images(row) for row in rows):
+        parser.error("The nanovllm reranker backend does not support image rows")
     if args.backend == "mlx":
         from . import mlx_backend
 
@@ -54,11 +56,17 @@ def main() -> None:
         direct, serial, shared = mlx_backend.score, mlx_backend.SerialPrefixScorer, mlx_backend.score_shared
         backend = None
     elif args.backend == "nanovllm":
-        from .backends import NanoVLLMBackend, NanoVLLMMultimodalBackend
+        if args.mode == "reranker":
+            from .backends import NanoVLLMRerankerBackend
 
-        if any(row_images(row) for row in rows):
+            backend = NanoVLLMRerankerBackend(args.model, args.revision)
+        elif any(row_images(row) for row in rows):
+            from .backends import NanoVLLMMultimodalBackend
+
             backend = NanoVLLMMultimodalBackend(args.model, args.revision)
         else:
+            from .backends import NanoVLLMBackend
+
             backend = NanoVLLMBackend(args.model, args.revision)
         model = tokenizer = None
         metadata = backend.model_info
@@ -76,7 +84,7 @@ def main() -> None:
             for row in rows:
                 destination.write(json.dumps(scorer.score(row), allow_nan=False) + "\n")
                 destination.flush()
-        elif backend is not None and args.mode == "direct":
+        elif backend is not None and args.mode in ("direct", "reranker"):
             # DecisionBackend protocol path: the backend owns model loading
             # and batch scoring; rows keep their input order.
             for result in backend.score_rows(rows, args.max_tokens):

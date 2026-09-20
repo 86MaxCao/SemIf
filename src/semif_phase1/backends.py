@@ -210,3 +210,97 @@ class NanoVLLMMultimodalBackend:
                 "probability_status": "conditional option score; uncalibrated as decision confidence",
             })
         return outputs
+
+
+class NanoVLLMRerankerBackend:
+    """nano-vLLM reranker prefill: native yes/no log-odds per option.
+
+    Reuses the torch reranker's prompt encoding byte for byte, so prompt
+    hashes and audit records stay comparable across backends. All pairs
+    of all rows are scored in one batched prefill via ``rerank_ids``.
+    """
+
+    def __init__(self, source: str, revision: str):
+        _require_pinned_revision(source, revision)
+        try:
+            from nanovllm import LLM
+        except ImportError as error:
+            raise RuntimeError(
+                "The nanovllm backend requires the nano-vllm-prefillonly package"
+            ) from error
+        self.engine = LLM(
+            source,
+            revision=revision,
+            is_reranker=True,
+            reranker_type="qwen3",
+            prefill_only_mode=True,
+            max_tokens_hint=1,
+        )
+        self.tokenizer = self.engine.tokenizer
+        self.model_info = {
+            "source": source,
+            "revision": revision,
+            "backend": "nanovllm",
+            "nanovllm_model_revision": getattr(self.engine.config, "model_revision", None),
+        }
+
+    def score_rows(self, rows: list[dict], max_tokens: int) -> list[dict]:
+        import math
+
+        from .reranker import _encode, PROMPT_VERSION as RERANKER_PROMPT_VERSION
+
+        started = time.perf_counter()
+        specs = []  # (row_index, option_index, ids, prompt_hash)
+        for row_index, row in enumerate(rows):
+            for option_index, option in enumerate(row["options"]):
+                ids, prompt_hash = _encode(self.tokenizer, row, option, max_tokens)
+                specs.append((row_index, option_index, ids, prompt_hash))
+
+        forward_start = time.perf_counter()
+        scores = self.engine.rerank_ids([ids for _, _, ids, _ in specs]).float().tolist()
+        forward_seconds = time.perf_counter() - forward_start
+
+        # The engine returns sigmoid(log_odds); invert to log_odds so the
+        # output contract matches the torch reranker path exactly.
+        def log_odds(p: float) -> float:
+            p = min(max(p, 1e-12), 1 - 1e-12)
+            return math.log(p / (1 - p))
+
+        results = [
+            {
+                "id": row["id"],
+                "option_ids": [option["id"] for option in row["options"]],
+                "probabilities": None,
+                "option_logits": None,
+                "independent_binary_relevance": None,
+                "input_tokens": 0,
+                "max_option_input_tokens": 0,
+                "forward_seconds": forward_seconds,
+                "total_seconds": None,
+                "option_prompt_sha256": None,
+                "pair_batches": [{"pair_batch_size": len(specs), "forward_seconds": forward_seconds}],
+                "prompt_version": RERANKER_PROMPT_VERSION,
+                "model": self.model_info,
+                "backend": "nanovllm",
+                "readout": "native yes/no log-odds per option, normalized only for relative comparison",
+                "probability_status": "relative option compatibility; uncalibrated as categorical probability",
+            }
+            for row in rows
+        ]
+        for (row_index, option_index, ids, prompt_hash), score in zip(specs, scores):
+            result = results[row_index]
+            odds = log_odds(score)
+            option_count = len(rows[row_index]["options"])
+            if result["option_logits"] is None:
+                result["option_logits"] = [0.0] * option_count
+                result["independent_binary_relevance"] = [0.0] * option_count
+                result["option_prompt_sha256"] = [None] * option_count
+            result["option_logits"][option_index] = odds
+            result["independent_binary_relevance"][option_index] = score
+            result["option_prompt_sha256"][option_index] = prompt_hash
+            result["input_tokens"] += len(ids)
+            result["max_option_input_tokens"] = max(result["max_option_input_tokens"], len(ids))
+        for result in results:
+            result["probabilities"] = softmax(result["option_logits"])
+            result["total_seconds"] = time.perf_counter() - started
+        return results
